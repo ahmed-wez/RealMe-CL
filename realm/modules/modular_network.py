@@ -136,6 +136,12 @@ class ModularNetwork(nn.Module):
         self.modules[module_id] = module.to(self.device)
         module.task_associations.append(task_id)
         
+        # FREEZE all previous task modules (prevent forgetting!)
+        for mod_id, mod in self.modules.items():
+            if mod_id != module_id:  # Don't freeze the new module
+                for param in mod.parameters():
+                    param.requires_grad = False
+        
         return module_id
     
     def create_module_for_task(
