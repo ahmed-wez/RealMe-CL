@@ -158,11 +158,14 @@ class REALMAgent(nn.Module):
         novelty = kwargs.get('novelty', 0.0)
         gradient_magnitude = kwargs.get('gradient_magnitude', 0.0)
         
-        # Store in buffer
+        # BOOST importance for current task (prioritize recent learning)
+        importance_boost = 1.5 if self.current_task_id == max(self.task_performance.keys()) else 1.0
+        
+        # Store in buffer with boosted importance
         self.episodic_buffer.store(
             state=state,
             action=action,
-            reward=reward,
+            reward=reward * importance_boost,  # Boost reward for importance calculation
             next_state=next_state,
             done=done,
             task_id=self.current_task_id,
