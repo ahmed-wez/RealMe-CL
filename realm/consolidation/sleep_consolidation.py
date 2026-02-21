@@ -134,21 +134,38 @@ class SleepConsolidation:
             print(f"\n=== Sleep Consolidation #{self.consolidation_count} ===")
             print(f"Replaying {self.n_replay_cycles} cycles...")
         
+        # Get unique tasks in buffer
+        unique_tasks = set(exp.task_id for exp in self.episodic_buffer.buffer)
+        
         pbar = tqdm(range(self.n_replay_cycles), disable=not verbose)
         for cycle in pbar:
-            # Sample batch (importance-weighted)
-            batch = self.episodic_buffer.sample(
-                batch_size=self.batch_size,
-                prioritized=True
-            )
+            # CRITICAL: Replay each task SEPARATELY (no mixing!)
+            cycle_forward_loss = 0
+            cycle_reverse_loss = 0
             
-            # Forward replay
-            forward_loss = self._forward_replay(batch)
-            stats['forward_loss'].append(forward_loss)
+            for task_id in unique_tasks:
+                # Sample ONLY from this task
+                task_batch = [exp for exp in self.episodic_buffer.buffer if exp.task_id == task_id]
+                if len(task_batch) < 32:
+                    continue
+                
+                # Sample from task
+                import random
+                batch = random.sample(task_batch, min(self.batch_size // len(unique_tasks), len(task_batch)))
+                
+                # Set current task in modular network
+                self.modular_network.set_task(task_id)
+                
+                # Forward replay
+                forward_loss = self._forward_replay(batch)
+                cycle_forward_loss += forward_loss
+                
+                # Reverse replay
+                reverse_loss = self._reverse_replay(batch)
+                cycle_reverse_loss += reverse_loss
             
-            # Reverse replay
-            reverse_loss = self._reverse_replay(batch)
-            stats['reverse_loss'].append(reverse_loss)
+            stats['forward_loss'].append(cycle_forward_loss / len(unique_tasks))
+            stats['reverse_loss'].append(cycle_reverse_loss / len(unique_tasks))
             
             self.total_replay_steps += 1
             
