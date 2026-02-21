@@ -1,0 +1,61 @@
+# REALM-CL Configuration for Meta-World Benchmark
+
+# Environment settings
+env:
+  benchmark: "metaworld"  # metaworld, continual_world
+  task_sequence: "ML10"   # ML10, ML45, custom
+  num_tasks: 10
+  max_episode_steps: 500
+  
+# Agent settings
+agent:
+  state_dim: null  # Auto-detected from environment
+  action_dim: null  # Auto-detected from environment
+  hidden_dim: 256
+  learning_rate: 0.0003
+
+# Memory settings
+memory:
+  hierarchical_capacity: 1000  # Total modules across all layers
+  core_ratio: 0.2              # 20% for core layer
+  family_ratio: 0.3            # 30% for family layer
+  buffer_capacity: 10000       # Episodic buffer size
+  
+# Consolidation settings
+consolidation:
+  frequency: 10000             # Steps between sleep phases
+  n_replay_cycles: 100         # Replay iterations per sleep
+  batch_size: 256              # Replay batch size
+  forward_weight: 0.5          # Weight for forward model loss
+  reverse_weight: 0.5          # Weight for value learning loss
+
+# Training settings
+training:
+  total_steps: 1000000         # Total training steps
+  episodes_per_task: 1000      # Episodes to train on each task
+  eval_frequency: 10000        # Steps between evaluations
+  eval_episodes: 10            # Episodes per task for evaluation
+  checkpoint_frequency: 50000  # Steps between checkpoints
+  
+# Exploration settings
+exploration:
+  initial_noise: 0.3           # Initial exploration noise
+  noise_decay: 0.9999          # Noise decay rate
+  min_noise: 0.01              # Minimum noise level
+
+# Logging settings
+logging:
+  use_tensorboard: true
+  use_wandb: false
+  wandb_project: "realm-cl"
+  wandb_entity: null
+  log_frequency: 1000          # Steps between log updates
+  save_videos: false
+  
+# Reproducibility
+seed: 42
+deterministic: false
+
+# Hardware
+device: "cpu"  # cuda, cpu (auto-detects if cuda available)
+num_workers: 4
