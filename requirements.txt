@@ -1,0 +1,28 @@
+# Core dependencies
+torch>=2.0.0
+numpy>=1.24.0
+gymnasium>=0.29.0
+
+# Meta-World benchmark
+# Install separately: pip install git+https://github.com/Farama-Foundation/Metaworld.git@master#egg=metaworld
+
+# Configuration and logging
+pyyaml>=6.0
+tensorboard>=2.14.0
+wandb>=0.15.0
+
+# Utilities
+tqdm>=4.65.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+pandas>=2.0.0
+
+# Development
+pytest>=7.4.0
+black>=23.7.0
+flake8>=6.1.0
+mypy>=1.5.0
+
+# Optional: for better performance
+# torch-scatter
+# torch-geometric
