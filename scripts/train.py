@@ -300,7 +300,8 @@ def main():
         logger.log(f"{'='*60}\n")
         
         # CREATE NEW MODULE FOR THIS TASK
-        if task_id not in [m.task_associations[0] for m in agent.modular_network.modules.values() if m.task_associations]:
+        existing_modules = [m for m in agent.modular_network.modules.values() if task_id in m.task_associations]
+        if len(existing_modules) == 0:
             new_module = agent.modular_network.create_module_for_task(
                 task_id=task_id,
                 similar_tasks=[task_id - 1] if task_id > 0 else None
@@ -308,13 +309,25 @@ def main():
             agent.modular_network.add_module(new_module, task_id)
             logger.log(f"✅ Created new module for Task {task_id}")
         
+        # ADAPTIVE EPISODES: harder tasks get more training
+        # Task 0 (reach) is easy, Tasks 1-2 (push, pick) are hard
+        task_difficulty = {0: 1.0, 1: 2.0, 2: 2.5}  # Multipliers
+        episodes_for_task = int(config['training']['episodes_per_task'] * task_difficulty.get(task_id, 1.0))
+        logger.log(f"Training for {episodes_for_task} episodes (difficulty multiplier: {task_difficulty.get(task_id, 1.0)}x)")
+        
         # Train on task
         env = envs[task_name]
+        # Set Meta-World task
+        if tasks_dict and task_name in tasks_dict and hasattr(env, 'set_task'):
+            import random
+            task = random.choice(tasks_dict[task_name])
+            env.set_task(task)
+        
         task_rewards = train_on_task(
             agent=agent,
             env=env,
             task_id=task_id,
-            n_episodes=config['training']['episodes_per_task'],
+            n_episodes=episodes_for_task,  # ADAPTIVE!
             config=config,
             logger=logger,
             tasks_list=tasks_dict.get(task_name, None)
