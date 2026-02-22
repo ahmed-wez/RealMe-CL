@@ -10,7 +10,7 @@ Main agent class that integrates:
 Provides unified interface for continual RL.
 """
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.optim as optim
