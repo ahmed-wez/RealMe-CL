@@ -111,7 +111,7 @@ class REALMAgent(nn.Module):
         deterministic: bool = False
     ) -> Tuple[np.ndarray, Dict]:
         """
-        Select action for given state.
+        Select action for given state using PPO policy.
         
         Args:
             state: Current state
@@ -123,19 +123,18 @@ class REALMAgent(nn.Module):
         """
         with torch.no_grad():
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-            action, info = self.modular_network(
+            
+            # Use PPO's action sampling
+            action, log_prob, entropy, value = self.modular_network.get_action_and_value(
                 state_tensor,
-                task_id=self.current_task_id,
                 deterministic=deterministic
             )
             
-            # Add noise for exploration if not deterministic
-            if not deterministic:
-                noise = torch.randn_like(action) * 0.1
-                action = action + noise
-            
-            # Clip to action bounds
-            action = torch.clamp(action, -1.0, 1.0)
+            info = {
+                'log_prob': log_prob.item(),
+                'entropy': entropy.item(),
+                'value': value.item()
+            }
             
         return action.cpu().numpy()[0], info
     
@@ -183,64 +182,168 @@ class REALMAgent(nn.Module):
     
     def train_step(
         self,
+        trajectories: List[Dict] = None,
+        n_epochs: int = 4,
         batch_size: int = 256
     ) -> Dict:
         """
-        Perform one training step (online learning).
-        
-        Samples from episodic buffer and updates policy.
+        PPO training step using collected trajectories.
         
         Args:
-            batch_size: Batch size for training
+            trajectories: List of trajectory dictionaries
+            n_epochs: Number of PPO epochs
+            batch_size: Mini-batch size
             
         Returns:
             Training statistics
         """
-        if len(self.episodic_buffer) < batch_size:
-            return {'status': 'insufficient_data'}
+        # If trajectories not provided, sample from buffer (fallback)
+        if trajectories is None:
+            if len(self.episodic_buffer) < batch_size:
+                return {'status': 'insufficient_data'}
+            
+            batch = self.episodic_buffer.sample(batch_size, prioritized=False)
+            
+            # Convert to trajectory format
+            trajectories = [{
+                'states': torch.FloatTensor(np.array([exp.state for exp in batch])).to(self.device),
+                'actions': torch.FloatTensor(np.array([exp.action for exp in batch])).to(self.device),
+                'rewards': torch.FloatTensor([exp.reward for exp in batch]).to(self.device),
+                'dones': torch.FloatTensor([float(exp.done) for exp in batch]).to(self.device),
+                'log_probs': torch.zeros(len(batch)).to(self.device),  # Dummy for fallback
+                'values': torch.zeros(len(batch)).to(self.device)  # Dummy for fallback
+            }]
         
-        # Sample batch
-        batch = self.episodic_buffer.sample(batch_size, prioritized=True)
+        # Combine all trajectories
+        all_states = torch.cat([traj['states'] for traj in trajectories])
+        all_actions = torch.cat([traj['actions'] for traj in trajectories])
+        all_old_log_probs = torch.cat([traj['log_probs'] for traj in trajectories])
+        all_advantages = torch.cat([traj['advantages'] for traj in trajectories])
+        all_returns = torch.cat([traj['returns'] for traj in trajectories])
         
-        # Prepare tensors
-        states = torch.FloatTensor(np.array([exp.state for exp in batch])).to(self.device)
-        actions = torch.FloatTensor(np.array([exp.action for exp in batch])).to(self.device)
-        rewards = torch.FloatTensor([exp.reward for exp in batch]).to(self.device)
-        next_states = torch.FloatTensor(np.array([exp.next_state for exp in batch])).to(self.device)
-        dones = torch.FloatTensor([float(exp.done) for exp in batch]).to(self.device)
+        # Normalize advantages
+        all_advantages = (all_advantages - all_advantages.mean()) / (all_advantages.std() + 1e-8)
         
-        # Forward pass
-        predicted_actions, _ = self.modular_network(states, task_id=self.current_task_id)
+        # PPO hyperparameters
+        clip_epsilon = 0.2
+        value_coef = 0.5
+        entropy_coef = 0.01
         
-        # REWARD-WEIGHTED BEHAVIORAL CLONING
-        # Weight samples by their rewards (imitate good actions more)
-        with torch.no_grad():
-            # Normalize rewards to [0, 1]
-            reward_weights = (rewards - rewards.min()) / (rewards.max() - rewards.min() + 1e-8)
-            # Make weights more extreme (focus on best samples)
-            reward_weights = reward_weights.pow(2)
-            reward_weights = reward_weights / (reward_weights.sum() + 1e-8)
-        
-        # MSE loss weighted by reward
-        action_diff = (predicted_actions - actions).pow(2).sum(dim=-1)
-        policy_loss = (action_diff * reward_weights * len(reward_weights)).mean()
-        
-        # L2 regularization to prevent overfitting
-        l2_reg = 0.0001 * sum(p.pow(2).sum() for p in self.modular_network.parameters())
-        total_loss = policy_loss + l2_reg
-        
-        # Update
-        self.optimizer.zero_grad()
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.modular_network.parameters(), 0.5)
-        self.optimizer.step()
-        
-        return {
-            'policy_loss': policy_loss.item(),
-            'total_loss': total_loss.item(),
-            'buffer_size': len(self.episodic_buffer),
-            'avg_reward_weight': reward_weights.mean().item()
+        # Training statistics
+        stats = {
+            'policy_loss': [],
+            'value_loss': [],
+            'entropy': [],
+            'total_loss': [],
+            'clip_fraction': [],
+            'approx_kl': []
         }
+        
+        # PPO epochs
+        for epoch in range(n_epochs):
+            # Mini-batch training
+            indices = torch.randperm(len(all_states))
+            
+            for start in range(0, len(all_states), batch_size):
+                end = start + batch_size
+                batch_indices = indices[start:end]
+                
+                # Get batch
+                states_batch = all_states[batch_indices]
+                actions_batch = all_actions[batch_indices]
+                old_log_probs_batch = all_old_log_probs[batch_indices]
+                advantages_batch = all_advantages[batch_indices]
+                returns_batch = all_returns[batch_indices]
+                
+                # Forward pass
+                _, new_log_probs, entropy, values = self.modular_network.get_action_and_value(
+                    states_batch,
+                    action=actions_batch
+                )
+                
+                # Policy loss (PPO clipped objective)
+                ratio = torch.exp(new_log_probs - old_log_probs_batch)
+                surr1 = ratio * advantages_batch
+                surr2 = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon) * advantages_batch
+                policy_loss = -torch.min(surr1, surr2).mean()
+                
+                # Value loss
+                value_loss = 0.5 * (returns_batch - values).pow(2).mean()
+                
+                # Entropy bonus (for exploration)
+                entropy_loss = -entropy.mean()
+                
+                # Total loss
+                loss = policy_loss + value_coef * value_loss + entropy_coef * entropy_loss
+                
+                # Update
+                self.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.modular_network.parameters(), 0.5)
+                self.optimizer.step()
+                
+                # Statistics
+                with torch.no_grad():
+                    approx_kl = (old_log_probs_batch - new_log_probs).mean().item()
+                    clip_fraction = ((ratio - 1.0).abs() > clip_epsilon).float().mean().item()
+                
+                stats['policy_loss'].append(policy_loss.item())
+                stats['value_loss'].append(value_loss.item())
+                stats['entropy'].append(entropy.mean().item())
+                stats['total_loss'].append(loss.item())
+                stats['clip_fraction'].append(clip_fraction)
+                stats['approx_kl'].append(approx_kl)
+        
+        # Average statistics
+        return {
+            'policy_loss': np.mean(stats['policy_loss']),
+            'value_loss': np.mean(stats['value_loss']),
+            'entropy': np.mean(stats['entropy']),
+            'total_loss': np.mean(stats['total_loss']),
+            'clip_fraction': np.mean(stats['clip_fraction']),
+            'approx_kl': np.mean(stats['approx_kl']),
+            'buffer_size': len(self.episodic_buffer)
+        }
+    
+    def compute_gae(
+        self,
+        rewards: torch.Tensor,
+        values: torch.Tensor,
+        dones: torch.Tensor,
+        next_value: float,
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute Generalized Advantage Estimation (GAE).
+        
+        Args:
+            rewards: Reward tensor
+            values: Value estimates
+            dones: Done flags
+            next_value: Value of next state after trajectory
+            gamma: Discount factor
+            gae_lambda: GAE lambda parameter
+            
+        Returns:
+            advantages, returns
+        """
+        advantages = torch.zeros_like(rewards)
+        last_gae = 0
+        
+        # Compute advantages backwards
+        for t in reversed(range(len(rewards))):
+            if t == len(rewards) - 1:
+                next_value_t = next_value
+            else:
+                next_value_t = values[t + 1]
+            
+            delta = rewards[t] + gamma * next_value_t * (1 - dones[t]) - values[t]
+            advantages[t] = last_gae = delta + gamma * gae_lambda * (1 - dones[t]) * last_gae
+        
+        returns = advantages + values
+        
+        return advantages, returns
     
     def sleep(self, verbose: bool = True):
         """
