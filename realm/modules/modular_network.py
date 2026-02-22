@@ -109,8 +109,99 @@ class ModularNetwork(nn.Module):
         # Default policy head (used before modules)
         self.default_head = nn.Linear(module_dim, action_dim).to(device)
         
-        self.current_task_id = 0
+        self.value_network = nn.Sequential(
+            nn.Linear(module_dim, module_dim),
+            nn.ReLU(),
+            nn.Linear(module_dim, module_dim),
+            nn.ReLU(),
+            nn.Linear(module_dim, 1)
+        ).to(device)
         
+        self.log_std = nn.Parameter(torch.zeros(action_dim).to(device))
+        self.current_task_id = 0
+    
+    def get_value(self, state: torch.Tensor) -> torch.Tensor:
+        """
+        Get value estimate for state.
+        
+        Args:
+            state: State tensor
+            
+        Returns:
+            Value estimate
+        """
+        features = self.feature_extractor(state)
+        value = self.value_network(features)
+        return value.squeeze(-1)
+    
+    def get_action_and_value(
+        self,
+        state: torch.Tensor,
+        action: Optional[torch.Tensor] = None,
+        deterministic: bool = False
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Get action, log probability, entropy, and value.
+        For PPO training.
+        
+        Args:
+            state: State tensor
+            action: If provided, compute log prob of this action
+            deterministic: Use mean action (no sampling)
+            
+        Returns:
+            action, log_prob, entropy, value
+        """
+        # Get features
+        features = self.feature_extractor(state)
+        
+        # Get mean action from policy
+        if len(self.modules) == 0:
+            action_mean = self.default_head(features)
+        else:
+            # Use task-specific modules
+            task_modules = [m for m in self.modules.values() if self.current_task_id in m.task_associations]
+            
+            if len(task_modules) == 0:
+                if len(self.modules) > 0:
+                    selected_modules = [list(self.modules.values())[-1]]
+                else:
+                    action_mean = self.default_head(features)
+                    selected_modules = []
+            else:
+                selected_modules = task_modules
+            
+            if len(selected_modules) > 0:
+                module_outputs = torch.stack([mod(features) for mod in selected_modules])
+                action_mean = module_outputs.mean(dim=0)
+            else:
+                action_mean = self.default_head(features)
+        
+        # Get value
+        value = self.value_network(features).squeeze(-1)
+        
+        # Create Gaussian distribution
+        action_std = torch.exp(self.log_std)
+        dist = torch.distributions.Normal(action_mean, action_std)
+        
+        # Sample or use mean
+        if action is None:
+            if deterministic:
+                action = action_mean
+            else:
+                action = dist.sample()
+            action = torch.clamp(action, -1.0, 1.0)
+        
+        # Compute log probability
+        log_prob = dist.log_prob(action).sum(dim=-1)
+        
+        # Compute entropy
+        entropy = dist.entropy().sum(dim=-1)
+        
+        return action, log_prob, entropy, value
+        
+    
+
     def add_module(
         self,
         module: Module,
@@ -135,12 +226,6 @@ class ModularNetwork(nn.Module):
         
         self.modules[module_id] = module.to(self.device)
         module.task_associations.append(task_id)
-        
-        # FREEZE all previous task modules (prevent forgetting!)
-        for mod_id, mod in self.modules.items():
-            if mod_id != module_id:  # Don't freeze the new module
-                for param in mod.parameters():
-                    param.requires_grad = False
         
         return module_id
     
