@@ -78,7 +78,7 @@ def train_on_task(
     tasks_list=None
 ):
     """
-    Train agent on single task.
+    Train agent on single task using PPO.
     
     Args:
         agent: REALM agent
@@ -87,6 +87,7 @@ def train_on_task(
         n_episodes: Number of episodes to train
         config: Configuration dict
         logger: Logger instance
+        tasks_list: Meta-World task list
     """
     agent.set_task(task_id)
     
@@ -98,30 +99,53 @@ def train_on_task(
         print(f"✅ Meta-World task set")
     
     episode_rewards = []
-    noise_std = config['exploration']['initial_noise']
+    trajectory_buffer = []  # Collect trajectories for PPO
+    
+    # PPO hyperparameters
+    horizon = 2048  # Collect this many steps before update
+    current_horizon_steps = 0
     
     for episode in tqdm(range(n_episodes), desc=f"Task {task_id}"):
+        # Reset environment
         state, _ = env.reset()
         done = False
         episode_reward = 0
         step = 0
         
+        # Trajectory for this episode
+        episode_states = []
+        episode_actions = []
+        episode_rewards_list = []
+        episode_dones = []
+        episode_log_probs = []
+        episode_values = []
+        
         while not done and step < config['env']['max_episode_steps']:
-            # Select action with epsilon-greedy exploration
-            if np.random.random() < max(0.1, noise_std):
-                # Random exploration
-                action = np.random.uniform(-1, 1, size=(env.action_space.shape[0],))
-            else:
-                # Policy action with small noise
-                action, info = agent.select_action(state, deterministic=False)
-                action = action + np.random.normal(0, noise_std * 0.1, size=action.shape)
-                action = np.clip(action, -1, 1)
+            # Convert state to tensor
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(agent.device)
+            
+            # Get action, log prob, and value from policy
+            with torch.no_grad():
+                action_tensor, log_prob, _, value = agent.modular_network.get_action_and_value(
+                    state_tensor,
+                    deterministic=False
+                )
+            
+            action = action_tensor.cpu().numpy()[0]
             
             # Step environment
             next_state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             
-            # Store experience
+            # Store in episode trajectory
+            episode_states.append(state)
+            episode_actions.append(action)
+            episode_rewards_list.append(reward)
+            episode_dones.append(float(done))
+            episode_log_probs.append(log_prob.item())
+            episode_values.append(value.item())
+            
+            # Store in buffer for later replay
             agent.store_experience(
                 state=state,
                 action=action,
@@ -130,25 +154,72 @@ def train_on_task(
                 done=done
             )
             
-            # Train MORE per step (was 1, now 4 updates per step)
-            if len(agent.episodic_buffer) >= config['consolidation']['batch_size']:
-                for _ in range(4):  # Multiple updates per environment step
-                    train_stats = agent.train_step(
-                        batch_size=config['consolidation']['batch_size']
-                    )
-            
             episode_reward += reward
             state = next_state
             step += 1
+            current_horizon_steps += 1
+            
+            # PPO UPDATE when horizon reached
+            if current_horizon_steps >= horizon or done:
+                # Get next value for GAE
+                with torch.no_grad():
+                    if done:
+                        next_value = 0.0
+                    else:
+                        next_state_tensor = torch.FloatTensor(state).unsqueeze(0).to(agent.device)
+                        _, _, _, next_value_tensor = agent.modular_network.get_action_and_value(
+                            next_state_tensor
+                        )
+                        next_value = next_value_tensor.item()
+                
+                # Convert episode data to tensors
+                states_tensor = torch.FloatTensor(np.array(episode_states)).to(agent.device)
+                actions_tensor = torch.FloatTensor(np.array(episode_actions)).to(agent.device)
+                rewards_tensor = torch.FloatTensor(episode_rewards_list).to(agent.device)
+                dones_tensor = torch.FloatTensor(episode_dones).to(agent.device)
+                log_probs_tensor = torch.FloatTensor(episode_log_probs).to(agent.device)
+                values_tensor = torch.FloatTensor(episode_values).to(agent.device)
+                
+                # Compute GAE advantages and returns
+                advantages, returns = agent.compute_gae(
+                    rewards_tensor,
+                    values_tensor,
+                    dones_tensor,
+                    next_value,
+                    gamma=0.99,
+                    gae_lambda=0.95
+                )
+                
+                # Store trajectory
+                trajectory_buffer.append({
+                    'states': states_tensor,
+                    'actions': actions_tensor,
+                    'log_probs': log_probs_tensor,
+                    'advantages': advantages,
+                    'returns': returns
+                })
+                
+                # PPO update
+                if len(trajectory_buffer) > 0:
+                    train_stats = agent.train_step(
+                        trajectories=trajectory_buffer,
+                        n_epochs=4,
+                        batch_size=256
+                    )
+                    trajectory_buffer = []  # Clear after update
+                
+                current_horizon_steps = 0
+                
+                # Clear episode trajectory for next collection
+                episode_states = []
+                episode_actions = []
+                episode_rewards_list = []
+                episode_dones = []
+                episode_log_probs = []
+                episode_values = []
         
         episode_rewards.append(episode_reward)
         agent.log_task_performance(episode_reward)
-        
-        # Decay noise
-        noise_std = max(
-            noise_std * config['exploration']['noise_decay'],
-            config['exploration']['min_noise']
-        )
         
         # Log progress
         if (episode + 1) % 10 == 0:
@@ -310,8 +381,7 @@ def main():
             logger.log(f"✅ Created new module for Task {task_id}")
         
         # ADAPTIVE EPISODES: harder tasks get more training
-        # Task 0 (reach) is easy, Tasks 1-2 (push, pick) are hard
-        task_difficulty = {0: 1.0, 1: 2.0, 2: 2.5}  # Multipliers
+        task_difficulty = {0: 1.0, 1: 3.0, 2: 4.0}  # More training for harder tasks
         episodes_for_task = int(config['training']['episodes_per_task'] * task_difficulty.get(task_id, 1.0))
         logger.log(f"Training for {episodes_for_task} episodes (difficulty multiplier: {task_difficulty.get(task_id, 1.0)}x)")
         
