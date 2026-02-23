@@ -472,7 +472,8 @@ class REALMAgent(nn.Module):
         """Save agent state"""
         torch.save({
             'modular_network': self.modular_network.state_dict(),
-            'optimizer': self.optimizer.state_dict(),
+            'policy_optimizer': self.policy_optimizer.state_dict(),
+            'value_optimizer': self.value_optimizer.state_dict(),
             'total_steps': self.total_steps,
             'current_task_id': self.current_task_id,
             'task_performance': self.task_performance
@@ -486,7 +487,16 @@ class REALMAgent(nn.Module):
         """Load agent state"""
         checkpoint = torch.load(path, map_location=self.device)
         self.modular_network.load_state_dict(checkpoint['modular_network'])
-        self.optimizer.load_state_dict(checkpoint['optimizer'])
+        
+        # Load optimizers (handle old single optimizer checkpoints)
+        if 'policy_optimizer' in checkpoint:
+            self.policy_optimizer.load_state_dict(checkpoint['policy_optimizer'])
+            self.value_optimizer.load_state_dict(checkpoint['value_optimizer'])
+        elif 'optimizer' in checkpoint:
+            # Backwards compatibility with old checkpoints
+            self.policy_optimizer.load_state_dict(checkpoint['optimizer'])
+            print("⚠️ Loaded old checkpoint format (single optimizer)")
+        
         self.total_steps = checkpoint['total_steps']
         self.current_task_id = checkpoint['current_task_id']
         self.task_performance = checkpoint['task_performance']
