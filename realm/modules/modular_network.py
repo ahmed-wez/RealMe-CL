@@ -117,9 +117,9 @@ class ModularNetwork(nn.Module):
             nn.Linear(module_dim, 1)
         ).to(device)
         
-        # Log std for Gaussian policy (MUST be Parameter for training!)
-        self.log_std = nn.Parameter(torch.ones(action_dim) * -0.5)  # Start with std ~0.6
-        print(f"✅ Initialized log_std: {self.log_std.data}")
+        # Log std for Gaussian policy (MUST be on correct device!)
+        self.log_std = nn.Parameter(torch.ones(action_dim, device=device) * -0.5)
+        print(f"✅ Initialized log_std on {device}: {self.log_std.data}")
         self.current_task_id = 0
     
     def get_value(self, state: torch.Tensor) -> torch.Tensor:
@@ -182,8 +182,8 @@ class ModularNetwork(nn.Module):
         # Get value
         value = self.value_network(features).squeeze(-1)
         
-        # Create Gaussian distribution
-        action_std = torch.exp(self.log_std)
+        # Create Gaussian distribution (ensure device compatibility)
+        action_std = torch.exp(self.log_std).to(action_mean.device)
         dist = torch.distributions.Normal(action_mean, action_std)
         
         # Sample or use mean
