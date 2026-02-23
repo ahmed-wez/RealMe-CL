@@ -90,11 +90,24 @@ class REALMAgent(nn.Module):
             device=device
         )
         
-        # Optimizer for online learning
-        self.optimizer = optim.Adam(
-            self.modular_network.parameters(),
-            lr=learning_rate
+        # SEPARATE OPTIMIZERS for policy and value (PPO best practice)
+        policy_params = (
+            list(self.modular_network.feature_extractor.parameters()) +
+            list(self.modular_network.default_head.parameters()) +
+            [self.modular_network.log_std]
         )
+        
+        value_params = list(self.modular_network.value_network.parameters())
+        
+        # Add module parameters to policy
+        for module in self.modular_network.modules.values():
+            policy_params.extend(list(module.parameters()))
+        
+        self.policy_optimizer = optim.Adam(policy_params, lr=learning_rate)
+        self.value_optimizer = optim.Adam(value_params, lr=learning_rate * 3)  # Higher LR for value
+        
+        print(f"✅ Policy optimizer: {sum(p.numel() for p in policy_params)} params")
+        print(f"✅ Value optimizer: {sum(p.numel() for p in value_params)} params")
         
         # State tracking
         self.current_task_id = 0
@@ -197,6 +210,16 @@ class REALMAgent(nn.Module):
         Returns:
             Training statistics
         """
+
+        # DEBUG: Check if value network parameters are in optimizer
+        if not hasattr(self, '_debug_printed'):
+            value_params = list(self.modular_network.value_network.parameters())
+            log_std_param = self.modular_network.log_std
+            print(f"✅ Value network has {len(value_params)} parameter tensors")
+            print(f"✅ log_std requires_grad: {log_std_param.requires_grad}")
+            print(f"✅ log_std value: {log_std_param.data}")
+            self._debug_printed = True
+
         # If trajectories not provided, sample from buffer (fallback)
         if trajectories is None:
             if len(self.episodic_buffer) < batch_size:
@@ -224,10 +247,11 @@ class REALMAgent(nn.Module):
         # Normalize advantages
         all_advantages = (all_advantages - all_advantages.mean()) / (all_advantages.std() + 1e-8)
         
-        # PPO hyperparameters
+        # PPO hyperparameters (TUNED for continuous control)
         clip_epsilon = 0.2
         value_coef = 0.5
-        entropy_coef = 0.01
+        entropy_coef = 0.001  # Lower entropy for more exploitation
+        max_grad_norm = 0.5
         
         # Training statistics
         stats = {
@@ -244,8 +268,13 @@ class REALMAgent(nn.Module):
             # Mini-batch training
             indices = torch.randperm(len(all_states))
             
-            for start in range(0, len(all_states), batch_size):
-                end = start + batch_size
+            # Adjust batch size if needed
+            actual_batch_size = min(batch_size, len(all_states) // 4)
+            if actual_batch_size < 32:
+                actual_batch_size = len(all_states)  # Use all data if too small
+            
+            for start in range(0, len(all_states), actual_batch_size):
+                end = start + actual_batch_size
                 batch_indices = indices[start:end]
                 
                 # Get batch
@@ -276,11 +305,13 @@ class REALMAgent(nn.Module):
                 # Total loss
                 loss = policy_loss + value_coef * value_loss + entropy_coef * entropy_loss
                 
-                # Update
-                self.optimizer.zero_grad()
+                # Update policy
+                self.policy_optimizer.zero_grad()
+                self.value_optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.modular_network.parameters(), 0.5)
-                self.optimizer.step()
+                torch.nn.utils.clip_grad_norm_(self.modular_network.parameters(), max_grad_norm)
+                self.policy_optimizer.step()
+                self.value_optimizer.step()
                 
                 # Statistics
                 with torch.no_grad():
