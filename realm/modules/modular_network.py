@@ -117,7 +117,9 @@ class ModularNetwork(nn.Module):
             nn.Linear(module_dim, 1)
         ).to(device)
         
-        self.log_std = nn.Parameter(torch.zeros(action_dim).to(device))
+        # Log std for Gaussian policy (MUST be Parameter for training!)
+        self.log_std = nn.Parameter(torch.ones(action_dim) * -0.5)  # Start with std ~0.6
+        print(f"✅ Initialized log_std: {self.log_std.data}")
         self.current_task_id = 0
     
     def get_value(self, state: torch.Tensor) -> torch.Tensor:
