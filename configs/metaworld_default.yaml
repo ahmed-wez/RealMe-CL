@@ -12,7 +12,7 @@ agent:
   state_dim: null  # Auto-detected from environment
   action_dim: null  # Auto-detected from environment
   hidden_dim: 256
-  learning_rate: 0.0003
+  learning_rate: 0.0001
 
 # Memory settings
 memory:
