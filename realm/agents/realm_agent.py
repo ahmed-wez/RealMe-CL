@@ -92,10 +92,14 @@ class REALMAgent(nn.Module):
         
         # SEPARATE OPTIMIZERS for policy and value (PPO best practice)
         policy_params = (
-            list(self.modular_network.feature_extractor.parameters()) +
+            list(self.modular_network.shared_feature_extractor.parameters()) +
             list(self.modular_network.default_head.parameters()) +
             [self.modular_network.log_std]
         )
+        
+        # Add task-specific feature extractors
+        for feat_ext in self.modular_network.feature_extractors.values():
+            policy_params.extend(list(feat_ext.parameters()))
         
         value_params = list(self.modular_network.value_network.parameters())
         
@@ -189,9 +193,10 @@ class REALMAgent(nn.Module):
         self.awake_steps += 1
         self.total_steps += 1
         
-        # Check if time to sleep
-        if self.awake_steps >= self.consolidation_frequency:
-            self.sleep()
+        # DISABLE SLEEP - it's causing catastrophic forgetting!
+        # (Re-enable after fixing task-specific replay)
+        # if self.awake_steps >= self.consolidation_frequency:
+        #     self.sleep()
     
     def train_step(
         self,
