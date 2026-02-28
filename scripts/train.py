@@ -357,6 +357,9 @@ def main():
         # CREATE NEW MODULE FOR THIS TASK
         existing_modules = [m for m in agent.modular_network.modules.values() if task_id in m.task_associations]
         if len(existing_modules) == 0:
+            # Create task-specific feature extractor first
+            agent.modular_network.create_feature_extractor_for_task(task_id)
+            
             new_module = agent.modular_network.create_module_for_task(
                 task_id=task_id,
                 similar_tasks=[task_id - 1] if task_id > 0 else None
