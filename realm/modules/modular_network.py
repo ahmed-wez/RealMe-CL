@@ -98,8 +98,11 @@ class ModularNetwork(nn.Module):
         # Task-specific routing networks
         self.task_routers: Dict[int, nn.Module] = {}
         
-        # Shared feature extractor
-        self.feature_extractor = nn.Sequential(
+        # Task-specific feature extractors (prevent interference!)
+        self.feature_extractors: Dict[int, nn.Module] = {}
+        
+        # Default shared feature extractor (fallback)
+        self.shared_feature_extractor = nn.Sequential(
             nn.Linear(state_dim, module_dim),
             nn.ReLU(),
             nn.Linear(module_dim, module_dim),
@@ -154,8 +157,11 @@ class ModularNetwork(nn.Module):
         Returns:
             action, log_prob, entropy, value
         """
-        # Get features
-        features = self.feature_extractor(state)
+        # Get task-specific features (or shared if not available)
+        if self.current_task_id in self.feature_extractors:
+            features = self.feature_extractors[self.current_task_id](state)
+        else:
+            features = self.shared_feature_extractor(state)
         
         # Get mean action from policy
         if len(self.modules) == 0:
@@ -229,7 +235,27 @@ class ModularNetwork(nn.Module):
         self.modules[module_id] = module.to(self.device)
         module.task_associations.append(task_id)
         
+        # CRITICAL: Freeze ALL previous modules (prevent forgetting!)
+        for mod_id, mod in self.modules.items():
+            if mod_id != module_id:  # Don't freeze the new module
+                for param in mod.parameters():
+                    param.requires_grad = False
+                print(f"🔒 Froze module {mod_id}")
+        
+        print(f"✅ Module {module_id} is trainable")
+        
         return module_id
+    
+    def create_feature_extractor_for_task(self, task_id: int):
+        """Create task-specific feature extractor"""
+        if task_id not in self.feature_extractors:
+            self.feature_extractors[task_id] = nn.Sequential(
+                nn.Linear(self.state_dim, self.module_dim),
+                nn.ReLU(),
+                nn.Linear(self.module_dim, self.module_dim),
+                nn.ReLU()
+            ).to(self.device)
+            print(f"✅ Created feature extractor for task {task_id}")
     
     def create_module_for_task(
         self,
