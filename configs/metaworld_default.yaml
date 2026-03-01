@@ -35,7 +35,7 @@ training:
   episodes_per_task: 1000      # Episodes to train on each task
   eval_frequency: 10000        # Steps between evaluations
   eval_episodes: 10            # Episodes per task for evaluation
-  checkpoint_frequency: 50000  # Steps between checkpoints
+  checkpoint_frequency: 20000  # Steps between checkpoints
   
 # Exploration settings
 exploration:
