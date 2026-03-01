@@ -213,9 +213,23 @@ def train_on_task(
             n_epochs=4,
             batch_size=64
         )
+
+    # STORE PARAMETERS AND IMPORTANCE FOR EWC
+    agent.compute_parameter_importance(task_id)
+    
+    # Store copy of current parameters
+    if not hasattr(agent, 'old_params'):
+        agent.old_params = {}
+    
+    agent.old_params[task_id] = {}
+    for name, param in agent.modular_network.named_parameters():
+        agent.old_params[task_id][name] = param.data.clone()
+    
+    logger.log(f"✅ Stored parameters for EWC (task {task_id})")
     
     avg_reward = np.mean(episode_rewards)
     logger.log(f"\nTask {task_id} completed. Average reward: {avg_reward:.2f}")
+        
     
     return episode_rewards
 
@@ -357,9 +371,6 @@ def main():
         # CREATE NEW MODULE FOR THIS TASK
         existing_modules = [m for m in agent.modular_network.modules.values() if task_id in m.task_associations]
         if len(existing_modules) == 0:
-            # Create task-specific feature extractor first
-            agent.modular_network.create_feature_extractor_for_task(task_id)
-            
             new_module = agent.modular_network.create_module_for_task(
                 task_id=task_id,
                 similar_tasks=[task_id - 1] if task_id > 0 else None
@@ -367,8 +378,8 @@ def main():
             agent.modular_network.add_module(new_module, task_id)
             logger.log(f"✅ Created new module for Task {task_id}")
         
-        # ADAPTIVE EPISODES: harder tasks get more training
-        task_difficulty = {0: 1.0, 1: 3.0, 2: 4.0}  # More training for harder tasks
+        # AGGRESSIVE training for harder tasks
+        task_difficulty = {0: 1.0, 1: 4.0, 2: 8.0}  # Task 2 gets 8x more episodes!
         episodes_for_task = int(config['training']['episodes_per_task'] * task_difficulty.get(task_id, 1.0))
         logger.log(f"Training for {episodes_for_task} episodes (difficulty multiplier: {task_difficulty.get(task_id, 1.0)}x)")
         
@@ -389,6 +400,34 @@ def main():
             logger=logger,
             tasks_list=tasks_dict.get(task_name, None)
         )
+        
+        # CURRICULUM: After learning new task, briefly revisit previous tasks
+        if task_id > 0:
+            logger.log(f"\n🔄 Curriculum: Revisiting previous tasks...")
+            
+            for prev_task_id in range(task_id):
+                prev_task_name = task_names[prev_task_id]
+                prev_env = envs[prev_task_name]
+                
+                if tasks_dict and prev_task_name in tasks_dict:
+                    import random
+                    task = random.choice(tasks_dict[prev_task_name])
+                    prev_env.set_task(task)
+                
+                # Brief retraining (50 episodes)
+                logger.log(f"  Revisiting Task {prev_task_id} ({prev_task_name})...")
+                revisit_rewards = train_on_task(
+                    agent=agent,
+                    env=prev_env,
+                    task_id=prev_task_id,
+                    n_episodes=50,  # Short revisit
+                    config=config,
+                    logger=logger,
+                    tasks_list=tasks_dict.get(prev_task_name, None)
+                )
+                
+                avg_revisit = np.mean(revisit_rewards[-10:])
+                logger.log(f"  ✅ Task {prev_task_id} revisit complete: {avg_revisit:.2f}")
         
         # Evaluate on all tasks
         eval_results = evaluate_all_tasks(
