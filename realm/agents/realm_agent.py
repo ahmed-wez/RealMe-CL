@@ -92,14 +92,10 @@ class REALMAgent(nn.Module):
         
         # SEPARATE OPTIMIZERS for policy and value (PPO best practice)
         policy_params = (
-            list(self.modular_network.shared_feature_extractor.parameters()) +
+            list(self.modular_network.feature_extractor.parameters()) +
             list(self.modular_network.default_head.parameters()) +
             [self.modular_network.log_std]
         )
-        
-        # Add task-specific feature extractors
-        for feat_ext in self.modular_network.feature_extractors.values():
-            policy_params.extend(list(feat_ext.parameters()))
         
         value_params = list(self.modular_network.value_network.parameters())
         
@@ -193,10 +189,9 @@ class REALMAgent(nn.Module):
         self.awake_steps += 1
         self.total_steps += 1
         
-        # DISABLE SLEEP - it's causing catastrophic forgetting!
-        # (Re-enable after fixing task-specific replay)
-        # if self.awake_steps >= self.consolidation_frequency:
-        #     self.sleep()
+        # Check if time to sleep
+        if self.awake_steps >= self.consolidation_frequency:
+            self.sleep()
     
     def train_step(
         self,
@@ -310,6 +305,24 @@ class REALMAgent(nn.Module):
                 # Total loss
                 loss = policy_loss + value_coef * value_loss + entropy_coef * entropy_loss
                 
+                # ADD EWC PENALTY (protect important parameters)
+                if hasattr(self, 'param_importance') and hasattr(self, 'old_params'):
+                    ewc_loss = 0
+                    ewc_lambda = 1000  # EWC strength
+                    
+                    for task_id, task_importance in self.param_importance.items():
+                        if task_id == self.current_task_id:
+                            continue  # Don't penalize current task
+                        
+                        for name, param in self.modular_network.named_parameters():
+                            if name in task_importance and name in self.old_params[task_id]:
+                                # Penalize deviation from old parameters
+                                importance = task_importance[name]
+                                old_param = self.old_params[task_id][name]
+                                ewc_loss += (importance * (param - old_param).pow(2)).sum()
+                    
+                    loss = loss + (ewc_lambda / 2) * ewc_loss
+                
                 # Update policy
                 self.policy_optimizer.zero_grad()
                 self.value_optimizer.zero_grad()
@@ -380,6 +393,41 @@ class REALMAgent(nn.Module):
         returns = advantages + values
         
         return advantages, returns
+
+    def compute_parameter_importance(self, task_id: int):
+        """
+        Compute Fisher Information Matrix (parameter importance).
+        
+        Important parameters for old tasks should be protected.
+        """
+        # Sample batch from current task
+        if len(self.episodic_buffer) < 256:
+            return
+        
+        batch = self.episodic_buffer.sample(256, prioritized=False)
+        states = torch.FloatTensor(np.array([exp.state for exp in batch])).to(self.device)
+        
+        # Compute gradients
+        self.modular_network.zero_grad()
+        
+        # Get log probs
+        _, log_probs, _, _ = self.modular_network.get_action_and_value(states)
+        loss = -log_probs.mean()  # Negative log likelihood
+        loss.backward()
+        
+        # Store parameter importance (gradient squared)
+        if not hasattr(self, 'param_importance'):
+            self.param_importance = {}
+        
+        if task_id not in self.param_importance:
+            self.param_importance[task_id] = {}
+        
+        for name, param in self.modular_network.named_parameters():
+            if param.grad is not None:
+                # Fisher information = gradient squared
+                self.param_importance[task_id][name] = param.grad.data.clone().pow(2)
+        
+        print(f"✅ Computed parameter importance for task {task_id}")
     
     def sleep(self, verbose: bool = True):
         """
